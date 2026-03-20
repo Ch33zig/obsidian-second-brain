@@ -1,0 +1,12 @@
+[project]
+name = "cognee-plugin"
+version = "0.1.0"
+description = "Second Brain – FastAPI server for the Obsidian plugin"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "cognee[api]>=0.5.5",
+    "fastapi>=0.135.1",
+    "python-dotenv>=1.2.2",
+    "uvicorn>=0.42.0",
+]

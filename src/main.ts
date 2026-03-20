@@ -1,99 +1,118 @@
-import {App, Editor, MarkdownView, Modal, Notice, Plugin} from 'obsidian';
-import {DEFAULT_SETTINGS, MyPluginSettings, SampleSettingTab} from "./settings";
+import { Plugin } from "obsidian";
+import { type CogneePluginSettings, DEFAULT_SETTINGS, CogneeSettingTab } from "./settings";
+import { CogneeClient } from "./cogneeClient";
+import { SecondBrainView, SECOND_BRAIN_VIEW_TYPE } from "./ui/SecondBrainView";
+import { GraphView, GRAPH_VIEW_TYPE } from "./ui/GraphView";
 
-// Remember to rename these classes and interfaces!
-
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+export default class CogneePlugin extends Plugin {
+	settings!: CogneePluginSettings;
+	client!: CogneeClient;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		this.addRibbonIcon('dice', 'Sample', (evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		this.client = new CogneeClient(this.settings.serverUrl, () => ({
+			"x-api-key": this.settings.apiKey,
+			"x-llm-provider": this.settings.llmProvider,
+			"x-llm-model": this.settings.llmModel,
+		}));
+
+		// Register the side-panel view
+		this.registerView(SECOND_BRAIN_VIEW_TYPE, (leaf) => {
+			return new SecondBrainView(leaf, this.client);
 		});
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status bar text');
+		// Register the graph visualisation view
+		this.registerView(GRAPH_VIEW_TYPE, (leaf) => new GraphView(leaf, this));
 
-		// This adds a simple command that can be triggered anywhere
-		this.addCommand({
-			id: 'open-modal-simple',
-			name: 'Open modal (simple)',
-			callback: () => {
-				new SampleModal(this.app).open();
-			}
+		// Ribbon icon – opens the second brain panel
+		this.addRibbonIcon("brain", "Open Second Brain", () => {
+			void this.activateView();
 		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'replace-selected',
-			name: 'Replace selected content',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				editor.replaceSelection('Sample editor command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-modal-complex',
-			name: 'Open modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
 
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
+		// Graph ribbon icon
+		this.addRibbonIcon("git-fork", "Open Knowledge Graph", () => {
+			void this.activateGraphView();
+		});
+
+		// ── Commands ─────────────────────────────────────────────────────────
+
+		this.addCommand({
+			id: "cognee-open-panel",
+			name: "Open Second Brain panel",
+			callback: () => void this.activateView(),
+		});
+
+
+
+		this.addCommand({
+			id: "cognee-search",
+			name: "Search Second Brain…",
+			callback: () => void this.activateView(),
+		});
+
+		this.addCommand({
+			id: "cognee-open-graph",
+			name: "Open Knowledge Graph visualisation",
+			callback: () => void this.activateGraphView(),
+		});
+
+		// ── Auto-ingest on save ───────────────────────────────────────────────
+
+		this.registerEvent(
+			this.app.vault.on("modify", async (file) => {
+				if (!this.settings.autoIngestOnSave) return;
+				if (!file.name.endsWith(".md")) return;
+				const content = await this.app.vault.read(file as Parameters<typeof this.app.vault.read>[0]);
+				try {
+					await this.client.add(content, file.name.replace(/\.md$/, ""));
+				} catch {
+					// silent – background ingest shouldn't spam notices
 				}
-				return false;
-			}
-		});
+			})
+		);
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
+		// ── Settings tab ─────────────────────────────────────────────────────
 
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			new Notice("Click");
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
-
+		this.addSettingTab(new CogneeSettingTab(this.app, this));
 	}
 
 	onunload() {
+		this.app.workspace.detachLeavesOfType(SECOND_BRAIN_VIEW_TYPE);
+		this.app.workspace.detachLeavesOfType(GRAPH_VIEW_TYPE);
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<MyPluginSettings>);
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<CogneePluginSettings>);
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
-	}
-}
-
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
-	}
-
-	onOpen() {
-		let {contentEl} = this;
-		contentEl.setText('Woah!');
+		// Re-create client if URL changed
+		this.client = new CogneeClient(this.settings.serverUrl, () => ({
+			"x-api-key": this.settings.apiKey,
+			"x-llm-provider": this.settings.llmProvider,
+			"x-llm-model": this.settings.llmModel,
+		}));
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	private async activateView() {
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(SECOND_BRAIN_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = workspace.getRightLeaf(false) ?? workspace.getLeaf("tab");
+			await leaf.setViewState({ type: SECOND_BRAIN_VIEW_TYPE, active: true });
+		}
+		workspace.revealLeaf(leaf);
+	}
+
+	private async activateGraphView() {
+		const { workspace } = this.app;
+		let leaf = workspace.getLeavesOfType(GRAPH_VIEW_TYPE)[0];
+		if (!leaf) {
+			leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({ type: GRAPH_VIEW_TYPE, active: true });
+		}
+		workspace.revealLeaf(leaf);
 	}
 }
